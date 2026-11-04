@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="hr">
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Čitanje slučajeva</title>
+<meta name="claude:viewport-fit-sides" content="cover">
+<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.3/dist/umd/supabase.js"></script>
+<style>
+/* Layout: a reading desk. The radiograph runs full width, like a lightbox; below it the case
+   file and the answer sheet sit side by side, stacking on a phone. */
+:root {
+  --bg: #f4f6f7; --surface: #ffffff; --ink: #14222b; --muted: #5a6872; --line: #ccd5da;
+  --accent: #0d6b73; --accent-ink: #ffffff; --done: #2f7d4a; --done-bg: #e2f1e6;
+  --warn: #a4321f; --lightbox: #050809;
+  --body: "Atkinson Hyperlegible", system-ui, sans-serif;
+  --mono: "IBM Plex Mono", ui-monospace, Consolas, monospace;
+}
+@media (prefers-color-scheme: dark) { :root:not([data-theme="light"]) {
+  --bg: #0f171c; --surface: #16222a; --ink: #e3ebef; --muted: #9aaab3; --line: #2d3d46;
+  --accent: #4fb8bf; --accent-ink: #062226; --done: #7fd39a; --done-bg: #173726;
+  --warn: #ff8a73; --lightbox: #000000; color-scheme: dark; } }
+:root[data-theme="dark"] {
+  --bg: #0f171c; --surface: #16222a; --ink: #e3ebef; --muted: #9aaab3; --line: #2d3d46;
+  --accent: #4fb8bf; --accent-ink: #062226; --done: #7fd39a; --done-bg: #173726;
+  --warn: #ff8a73; --lightbox: #000000; color-scheme: dark; }
+body { background: var(--bg); color: var(--ink); font: 16px/1.5 var(--body); margin: 0; }
+.wrap { max-width: 88rem; margin: 0 auto; padding-block: 1rem 3rem;
+        padding-left: max(16px, env(safe-area-inset-left, 0px));
+        padding-right: max(16px, env(safe-area-inset-right, 0px)); }
+h1, h2, h3 { text-wrap: balance; line-height: 1.2; margin: 0; }
+h1 { font-size: 1.6rem; } h2 { font-size: 1.2rem; } h3 { font-size: 1.02rem; }
+p { margin: 0; }
+[hidden] { display: none !important; }  /* even on panels laid out with flex */
+.stack { display: flex; flex-direction: column; gap: 0.8rem; }
+.muted { color: var(--muted); }
+.small { font-size: 0.88rem; }
+.mono { font-family: var(--mono); font-variant-numeric: tabular-nums; }
+.panel { background: var(--surface); border: 1px solid var(--line); border-radius: 6px; padding: 1rem; }
+button { font: inherit; padding: 0.4rem 0.9rem; border-radius: 5px; border: 1px solid var(--line);
+         background: var(--surface); color: var(--ink); cursor: pointer; }
+button:disabled { opacity: 0.6; cursor: progress; }
+button:focus-visible, input:focus-visible, select:focus-visible, textarea:focus-visible, a:focus-visible {
+  outline: 2px solid var(--accent); outline-offset: 2px; }
+button.primary { background: var(--accent); color: var(--accent-ink); border-color: var(--accent); font-weight: 700; }
+input, select, textarea { font: inherit; color: var(--ink); background: var(--surface);
+  border: 1px solid var(--line); border-radius: 4px; padding: 0.3rem 0.4rem; box-sizing: border-box; }
+textarea { width: 100%; min-height: 7rem; }
+.cases { display: flex; flex-wrap: wrap; gap: 0.3rem; }
+.cases button { padding: 0.15rem 0.5rem; font-family: var(--mono); font-size: 0.9rem; }
+.cases button.done { background: var(--done-bg); border-color: var(--done); color: var(--done); }
+.cases button.current { outline: 2px solid var(--ink); }
+.zoom { display: flex; gap: 0.4rem; align-items: center; flex-wrap: wrap; }
+.lightbox { background: var(--lightbox); border-radius: 6px; overflow: auto; max-height: 75vh; min-height: 8rem; }
+.lightbox img { display: block; width: calc(var(--zoom, 1) * 100%); max-width: none; cursor: zoom-in; }
+.columns { display: grid; grid-template-columns: minmax(0, 2fr) minmax(0, 3fr); gap: 1.2rem; }
+@media (max-width: 60rem) { .columns { grid-template-columns: minmax(0, 1fr); } }
+.case-file p, .case-file ul { margin: 0 0 0.6rem; }
+.case-file .banner { color: var(--warn); }
+.sheet { overflow-x: auto; }
+.sheet table { border-collapse: collapse; width: 100%; min-width: 40rem; }
+.sheet th, .sheet td { border-bottom: 1px solid var(--line); padding: 0.35rem 0.3rem; text-align: left; vertical-align: top; }
+.sheet th { font-size: 0.85rem; color: var(--muted); font-weight: 700; }
+.sheet td input[type=text], .sheet td select { width: 100%; }
+.sheet td input[type=number] { width: 4.8rem; }
+.problems { color: var(--warn); }
+.problems ul { margin: 0.3rem 0 0; padding-left: 1.2rem; }
+.status { display: flex; flex-direction: column; gap: 0.4rem; }
+.status label { display: flex; gap: 0.5rem; align-items: center; }
+.saved-note { color: var(--done); font-weight: 700; }
+.file-result { font-weight: 700; }
+.bar { display: flex; flex-wrap: wrap; gap: 0.6rem; align-items: center; justify-content: space-between; }
+@media (prefers-reduced-motion: no-preference) { .lightbox img { transition: width 120ms ease-out; } }
+</style>
+
+<div class="wrap stack">
+  <header class="stack">
+    <h1>Čitanje slučajeva</h1>
+    <p class="muted small">Prototip diplomskog rada: dijagnoza panoramskih snimki iz javnog skupa DENTEX, kao doktor dentalne medicine. Kartoni su izmišljeni. Pristup imaju samo pozvani čitači.</p>
+  </header>
+
+  <section id="loading" data-screen class="panel"><p>Učitavanje…</p></section>
+
+  <section id="signin" data-screen class="panel stack" hidden>
+    <h2>Prijava</h2>
+    <p>Upišite adresu e-pošte na koju ste dobili pozivnicu. Poslat ćemo vam poveznicu za prijavu; kliknite je i obrazac se otvara. Lozinka nije potrebna.</p>
+    <label class="stack small" for="email">E-pošta
+      <input type="email" id="email" autocomplete="email" inputmode="email">
+    </label>
+    <p><button type="button" class="primary" id="signin-button">Pošalji poveznicu za prijavu</button></p>
+    <p id="signin-message" class="small" aria-live="polite"></p>
+  </section>
+
+  <section id="not-invited" data-screen class="panel stack" hidden>
+    <h2>Ova adresa nije pozvana</h2>
+    <p>Prijavljeni ste, ali ova adresa e-pošte nije na popisu čitača. Javite se autorici.</p>
+    <p><button type="button" class="signout">Odjava</button></p>
+  </section>
+
+  <section id="finished" data-screen class="panel stack" hidden>
+    <h2>Svi slučajevi su pročitani</h2>
+    <p>Hvala! Vaši odgovori su spremljeni i autorica ih preuzima sama: ne trebate ništa slati. Možete otvoriti bilo koji slučaj i promijeniti odgovor.</p>
+    <p><button type="button" id="back">Natrag na slučajeve</button></p>
+  </section>
+
+  <section id="reader" data-screen class="stack" hidden>
+    <nav class="cases" id="cases" aria-label="Slučajevi"></nav>
+    <p class="muted small" id="progress"></p>
+    <div class="panel small bar">
+      <p>Odgovori se spremaju nakon svakog slučaja. Možete stati i nastaviti kasnije, i na drugom uređaju: prijavite se istom adresom.</p>
+      <button type="button" class="signout">Odjava</button>
+    </div>
+    <div class="panel small" id="unsaved" hidden>
+      <p>Imate nespremljene promjene na ovom slučaju.</p>
+      <p class="zoom"><button type="button" id="discard">Odbaci promjene i otvori</button>
+        <button type="button" id="stay">Ostani i spremi</button></p>
+    </div>
+    <h2 id="case-title"></h2>
+    <div class="zoom small">
+      <button type="button" id="zoom-out" aria-label="Smanji">−</button>
+      <span class="mono" id="zoom-level">100 %</span>
+      <button type="button" id="zoom-in" aria-label="Povećaj">+</button>
+      <button type="button" id="zoom-fit">Prilagodi</button>
+      <span class="muted">ili kliknite snimku</span>
+    </div>
+    <div class="lightbox" id="lightbox"><img id="xray" alt=""></div>
+    <div class="columns">
+      <section class="panel stack">
+        <h3>Karton</h3>
+        <div class="case-file" id="case-file"></div>
+      </section>
+      <section class="panel stack">
+        <h3>Vaša dijagnoza</h3>
+        <p class="muted small">Navedite samo zube na kojima je stanje prisutno ili ga sumnjate. Sigurnost (0–100 %) je koliko ste sigurni da je stanje prisutno; od 50 % nalaz se računa kao prisutan. Status pulpe navodite samo kada pulpa nije normalna; zub s punjenjem korijenskih kanala je „prethodno liječen”. Parodontni status upišite u cjelovitu dijagnozu.</p>
+        <div class="sheet">
+          <table>
+            <thead><tr><th>Zub (FDI)</th><th>Ciljno stanje</th><th>Kategorija</th><th>Sigurnost %</th><th>Bilješka</th><th><span hidden>Ukloni</span></th></tr></thead>
+            <tbody id="rows"></tbody>
+          </table>
+        </div>
+        <p><button type="button" id="add">+ Dodaj nalaz</button></p>
+        <label class="stack" for="overall"><strong>Cjelovita dijagnoza</strong>
+          <textarea id="overall" placeholder="Kratko izvješće o slučaju, kao u nalazu doktora dentalne medicine."></textarea>
+        </label>
+        <div id="problems" class="problems small" aria-live="polite"></div>
+        <p><button type="button" class="primary" id="save">Spremi i idi na sljedeći slučaj</button></p>
+      </section>
+    </div>
+  </section>
+
+  <footer class="muted small">Snimke: DENTEX (Hamamci i sur., 2023), CC BY-NC-SA 4.0, samo za nekomercijalnu uporabu.</footer>
+</div>
+
+<script type="application/json" id="setup">{
+ "categories": {
+  "caries": [
+   "ICCMS RA1",
+   "ICCMS RA2",
+   "ICCMS RA3",
+   "ICCMS RB4",
+   "ICCMS RC5",
+   "ICCMS RC6"
+  ],
+  "periapical-lesion": [
+   "asimptomatski apikalni parodontitis",
+   "simptomatski apikalni parodontitis",
+   "kronični apikalni apsces",
+   "akutni apikalni apsces",
+   "kondenzirajući osteitis"
+  ],
+  "pulp-status": [
+   "reverzibilni pulpitis",
+   "simptomatski ireverzibilni pulpitis",
+   "asimptomatski ireverzibilni pulpitis",
+   "nekroza pulpe",
+   "prethodno liječen",
+   "prethodno započeta terapija"
+  ]
+ },
+ "conditions": {
+  "caries": "Karijes",
+  "periapical-lesion": "Periapikalna lezija",
+  "pulp-status": "Status pulpe"
+ },
+ "teeth": [
+  11,
+  12,
+  13,
+  14,
+  15,
+  16,
+  17,
+  18,
+  21,
+  22,
+  23,
+  24,
+  25,
+  26,
+  27,
+  28,
+  31,
+  32,
+  33,
+  34,
+  35,
+  36,
+  37,
+  38,
+  41,
+  42,
+  43,
+  44,
+  45,
+  46,
+  47,
+  48
+ ],
+ "supabase_url": "https://dyzbpziyjoxigzktrdlc.supabase.co",
+ "supabase_key": "sb_publishable_1pButEYxWJB0RR_jnGk-NA__B6Cq8lD",
+ "bucket": "cases"
+}</script>
+<script>
+
+const SETUP = JSON.parse(document.getElementById('setup').textContent);
+let CASE_IDS = [], answers = {}, current = null, dirty = false, pending = null, opening = 0;
+const $ = id => document.getElementById(id);
+const esc = s => String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/"/g, '&quot;');
+const show = name => document.querySelectorAll('[data-screen]')
+  .forEach(screen => { screen.hidden = screen.id !== name; });
+
+function options(values, names, chosen) {
+  return '<option value="">— odaberite —</option>' + values.map(v =>
+    `<option value="${esc(v)}"${String(v) === String(chosen) ? ' selected' : ''}>${esc(names ? names[v] : v)}</option>`).join('');
+}
+function addRow(f) {
+  f = f || {tooth: '', condition: '', category: '', confidence: '', note: ''};
+  const tr = document.createElement('tr');
+  tr.innerHTML =
+    `<td><select class="tooth" aria-label="Zub">${options(SETUP.teeth, null, f.tooth)}</select></td>` +
+    `<td><select class="condition" aria-label="Ciljno stanje">${options(Object.keys(SETUP.conditions), SETUP.conditions, f.condition)}</select></td>` +
+    `<td><select class="category" aria-label="Kategorija"></select></td>` +
+    `<td><input type="number" class="confidence" aria-label="Sigurnost" min="0" max="100" step="5" value="${esc(f.confidence)}"></td>` +
+    `<td><input type="text" class="note" aria-label="Bilješka"></td>` +
+    `<td><button type="button" class="remove" aria-label="Ukloni nalaz">✕</button></td>`;
+  tr.querySelector('.note').value = f.note || '';
+  const condition = tr.querySelector('.condition'), category = tr.querySelector('.category');
+  const fill = chosen => { category.innerHTML = options(SETUP.categories[condition.value] || [], null, chosen); };
+  fill(f.category);
+  condition.addEventListener('change', () => fill());
+  tr.querySelector('.remove').addEventListener('click', () => { tr.remove(); dirty = true; });
+  tr.addEventListener('input', () => { dirty = true; });
+  $('rows').appendChild(tr);
+}
+
+let zoom = 1;
+function setZoom(z) { zoom = Math.min(5, Math.max(1, z)); $('lightbox').style.setProperty('--zoom', zoom);
+  $('zoom-level').textContent = Math.round(zoom * 100) + ' %'; }
+$('zoom-in').onclick = () => setZoom(zoom + 0.5);
+$('zoom-out').onclick = () => setZoom(zoom - 0.5);
+$('zoom-fit').onclick = () => setZoom(1);
+$('xray').addEventListener('click', () => setZoom(zoom === 1 ? 2.5 : 1));
+
+function firstUnread() { return CASE_IDS.find(c => !answers[c]) || null; }
+
+function renderNav() {
+  $('cases').innerHTML = '';
+  for (const c of CASE_IDS) {
+    const b = document.createElement('button');
+    b.type = 'button';
+    b.textContent = c.replace('dentex-', '');
+    b.className = [answers[c] ? 'done' : '', c === current ? 'current' : ''].join(' ').trim();
+    b.setAttribute('aria-label', `Slučaj ${c}${answers[c] ? ', spremljen' : ''}`);
+    b.onclick = () => openCase(c);
+    $('cases').appendChild(b);
+  }
+  const done = CASE_IDS.filter(c => answers[c]).length, who = readerLabel();
+  $('progress').textContent = `${who ? who + ' · ' : ''}${done} od ${CASE_IDS.length} gotovo`;
+}
+
+async function openCase(c, force) {
+  if (dirty && !force && current && current !== c) {
+    pending = c; $('unsaved').hidden = false; $('unsaved').scrollIntoView({block: 'nearest'}); return;
+  }
+  pending = null; $('unsaved').hidden = true;
+  current = c; dirty = false;
+  const ticket = ++opening;  // a later click wins over a case still loading
+  $('case-title').textContent = `Slučaj ${c} (${CASE_IDS.indexOf(c) + 1} od ${CASE_IDS.length})`;
+  $('xray').removeAttribute('src'); $('xray').alt = `Panoramska snimka, slučaj ${c}`;
+  setZoom(1);
+  $('case-file').innerHTML = '<p class="muted">Učitavanje…</p>';
+  $('rows').innerHTML = ''; $('problems').innerHTML = '';
+  const saved = answers[c];
+  (saved ? saved.findings : []).forEach(addRow);
+  $('overall').value = saved ? saved.overall_diagnosis : '';
+  renderNav(); show('reader'); window.scrollTo(0, 0);
+  let content;
+  try { content = await caseContent(c); }
+  catch (e) {
+    if (ticket === opening) $('case-file').innerHTML =
+      `<p class="problems">${esc(e.message || 'Slučaj se ne može učitati.')}</p>`;
+    return;
+  }
+  if (ticket !== opening) return;
+  if (content.image) $('xray').src = content.image;
+  $('case-file').innerHTML = content.case_file;
+}
+function finish() { renderNav(); show('finished'); }
+function continueReading() { const next = firstUnread(); if (next) openCase(next); else finish(); }
+
+$('overall').addEventListener('input', () => { dirty = true; });
+$('add').addEventListener('click', () => { addRow(); dirty = true; });
+$('discard').addEventListener('click', () => { if (pending) openCase(pending, true); });
+$('stay').addEventListener('click', () => { pending = null; $('unsaved').hidden = true; });
+window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
+
+$('save').addEventListener('click', async () => {
+  const number = v => v === '' ? null : Number(v);
+  const findings = [...$('rows').querySelectorAll('tr')].map(tr => ({
+    tooth: number(tr.querySelector('.tooth').value),
+    condition: tr.querySelector('.condition').value,
+    category: tr.querySelector('.category').value,
+    confidence: number(tr.querySelector('.confidence').value),
+    note: tr.querySelector('.note').value.trim(),
+  }));
+  const overall = $('overall').value.trim();
+  const missing = [], seen = new Set();
+  findings.forEach((f, i) => {
+    const empty = [f.tooth === null && 'zub', !f.condition && 'ciljno stanje', !f.category && 'kategoriju',
+                   f.confidence === null && 'sigurnost', !f.note && 'bilješku'].filter(Boolean);
+    if (empty.length) missing.push(`Nalaz ${i + 1}: upišite ili odaberite ${empty.join(', ')}.`);
+    if (f.confidence !== null && !(f.confidence >= 0 && f.confidence <= 100))
+      missing.push(`Nalaz ${i + 1}: sigurnost mora biti od 0 do 100.`);
+    const key = f.tooth + '/' + f.condition;
+    if (f.tooth !== null && f.condition && seen.has(key))
+      missing.push(`Nalaz ${i + 1}: zub ${f.tooth} s ovim stanjem već je naveden.`);
+    seen.add(key);
+  });
+  if (!overall) missing.push('Upišite cjelovitu dijagnozu.');
+  if (missing.length) {
+    $('problems').innerHTML = '<p>Nije spremljeno. Ispravite:</p><ul>' + missing.map(p => `<li>${esc(p)}</li>`).join('') + '</ul>';
+    return;
+  }
+  const answer = {case_id: current, overall_diagnosis: overall, findings, saved_at: new Date().toISOString()};
+  $('save').disabled = true;
+  try { await storeAnswer(answer); }
+  catch (e) { $('problems').textContent = 'Nije spremljeno: ' + (e.message || e); return; }
+  finally { $('save').disabled = false; }
+  answers[answer.case_id] = answer;
+  dirty = false;
+  continueReading();
+});
+
+const client = supabase.createClient(SETUP.supabase_url, SETUP.supabase_key);
+const SIGNED_URL_SECONDS = 3600;
+let reader = null;
+const files = {};  // case -> {image, case_file, at}: the signed addresses, reused for 50 minutes
+
+function readerLabel() { return reader ? reader.code : ''; }
+
+async function caseContent(c) {
+  const cached = files[c];
+  if (cached && Date.now() - cached.at < 50 * 60 * 1000) return cached;
+  const paths = [`${c}/image.png`, `${c}/case_file.html`];
+  const {data, error} = await client.storage.from(SETUP.bucket).createSignedUrls(paths, SIGNED_URL_SECONDS);
+  const url = path => { const d = (data || []).find(d => d.path === path); return d && !d.error ? d.signedUrl : null; };
+  if (error || !url(paths[0]) || !url(paths[1])) throw new Error('Slučaj se ne može učitati. Osvježite stranicu.');
+  const response = await fetch(url(paths[1]));
+  if (!response.ok) throw new Error('Karton se ne može učitati. Osvježite stranicu.');
+  files[c] = {image: url(paths[0]), case_file: await response.text(), at: Date.now()};
+  return files[c];
+}
+
+async function storeAnswer(a) {
+  const {error} = await client.from('answers').upsert({user_id: reader.user_id, ...a});
+  if (error) throw new Error(navigator.onLine === false
+    ? 'nema internetske veze. Spojite se i kliknite ponovno.'
+    : 'pokušajte ponovno za trenutak. Ako se ponavlja, odjavite se i prijavite ponovno.');
+}
+
+function signinMessage(text, good) {
+  $('signin-message').textContent = text;
+  $('signin-message').style.color = good ? 'var(--done)' : 'var(--warn)';
+}
+
+$('signin-button').addEventListener('click', async () => {
+  const email = $('email').value.trim();
+  if (!/^\S+@\S+\.\S+$/.test(email)) { signinMessage('Upišite adresu e-pošte.'); return; }
+  $('signin-button').disabled = true;
+  signinMessage('Šaljem…', true);
+  const {error} = await client.auth.signInWithOtp({email, options: {
+    shouldCreateUser: false,  // only invited readers: nobody signs up here
+    emailRedirectTo: location.origin + location.pathname}});
+  $('signin-button').disabled = false;
+  if (!error) signinMessage(`Poveznica je poslana na ${email}. Otvorite e-poštu (pogledajte i neželjenu poštu) i kliknite poveznicu; vrijedi sat vremena.`, true);
+  else if (error.status === 429) signinMessage('Poslano je previše poveznica. Pričekajte sat vremena pa pokušajte ponovno, ili otvorite poveznicu koju ste već dobili.');
+  else if (error.status === 422 || error.status === 400) signinMessage('Ova adresa nije pozvana. Upišite adresu na koju ste dobili pozivnicu ili se javite autorici.');
+  else signinMessage('Poveznica nije poslana. Provjerite internetsku vezu i pokušajte ponovno.');
+});
+$('email').addEventListener('keydown', e => { if (e.key === 'Enter') $('signin-button').click(); });
+
+document.querySelectorAll('.signout').forEach(b => b.addEventListener('click', async () => {
+  if (dirty && !confirm('Imate nespremljene promjene. Ipak se odjaviti?')) return;
+  dirty = false;
+  reader = null;  // the sign-out event below then needn't reload as well
+  await client.auth.signOut();
+  location.reload();
+}));
+$('back').addEventListener('click', () => openCase(CASE_IDS[0]));
+
+async function enter() {
+  const [me, cases, saved] = await Promise.all([
+    client.from('readers').select('user_id, code').maybeSingle(),
+    client.from('cases').select('case_id').order('position'),
+    client.from('answers').select('case_id, overall_diagnosis, findings, saved_at'),
+  ]);
+  if (me.error || cases.error || saved.error) {
+    show('signin'); signinMessage('Obrazac se ne može učitati. Osvježite stranicu za trenutak.'); return;
+  }
+  if (!me.data) { show('not-invited'); return; }
+  reader = me.data;
+  CASE_IDS = cases.data.map(c => c.case_id);
+  answers = {};
+  for (const a of saved.data) answers[a.case_id] = a;
+  if (!CASE_IDS.length) { show('signin'); signinMessage('Slučajevi još nisu postavljeni. Javite se autorici.'); return; }
+  continueReading();
+}
+
+async function start() {
+  // A link that has expired or was already used comes back with an error in the address.
+  const link = new URLSearchParams(location.hash.slice(1));
+  const linkError = link.get('error_code') || link.get('error');
+  if (linkError) history.replaceState(null, '', location.pathname);
+  const {data} = await client.auth.getSession();
+  if (data.session) { await enter(); return; }
+  show('signin');
+  if (linkError) signinMessage('Poveznica je istekla ili je već iskorištena. Upišite adresu i zatražite novu.');
+}
+client.auth.onAuthStateChange(event => { if (event === 'SIGNED_OUT' && reader) location.reload(); });
+start();
+
+</script>
+</html>

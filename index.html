@@ -114,6 +114,7 @@ textarea { width: 100%; min-height: 7rem; }
       <p class="zoom"><button type="button" id="discard">Odbaci promjene i otvori</button>
         <button type="button" id="stay">Ostani i spremi</button></p>
     </div>
+    <p class="saved-note small" id="just-saved" role="status" hidden></p>
     <h2 id="case-title"></h2>
     <div class="zoom small">
       <button type="button" id="zoom-out" aria-label="Smanji">−</button>
@@ -130,6 +131,7 @@ textarea { width: 100%; min-height: 7rem; }
       </section>
       <section class="panel stack">
         <h3>Vaša dijagnoza</h3>
+        <p class="saved-note small" id="restored" hidden>Vraćeni su vaši nespremljeni odgovori za ovaj slučaj. Kad završite, kliknite „Spremi”.</p>
         <p class="muted small">Navedite samo zube na kojima je stanje prisutno ili ga sumnjate. Sigurnost (0–100 %) je koliko ste sigurni da je stanje prisutno; od 50 % nalaz se računa kao prisutan. Status pulpe navodite samo kada pulpa nije normalna; zub s punjenjem korijenskih kanala je „prethodno liječen”. Parodontni status upišite u cjelovitu dijagnozu.</p>
         <div class="sheet">
           <table>
@@ -239,7 +241,7 @@ function addRow(f) {
     `<td><select class="tooth" aria-label="Zub">${options(SETUP.teeth, null, f.tooth)}</select></td>` +
     `<td><select class="condition" aria-label="Ciljno stanje">${options(Object.keys(SETUP.conditions), SETUP.conditions, f.condition)}</select></td>` +
     `<td><select class="category" aria-label="Kategorija"></select></td>` +
-    `<td><input type="number" class="confidence" aria-label="Sigurnost" min="0" max="100" step="5" value="${esc(f.confidence)}"></td>` +
+    `<td><input type="number" class="confidence" aria-label="Sigurnost" min="0" max="100" step="5" value="${esc(f.confidence ?? '')}"></td>` +
     `<td><input type="text" class="note" aria-label="Bilješka"></td>` +
     `<td><button type="button" class="remove" aria-label="Ukloni nalaz">✕</button></td>`;
   tr.querySelector('.note').value = f.note || '';
@@ -247,7 +249,7 @@ function addRow(f) {
   const fill = chosen => { category.innerHTML = options(SETUP.categories[condition.value] || [], null, chosen); };
   fill(f.category);
   condition.addEventListener('change', () => fill());
-  tr.querySelector('.remove').addEventListener('click', () => { tr.remove(); dirty = true; });
+  tr.querySelector('.remove').addEventListener('click', () => { tr.remove(); dirty = true; keepDraft(); });
   tr.addEventListener('input', () => { dirty = true; });
   $('rows').appendChild(tr);
 }
@@ -259,6 +261,29 @@ $('zoom-in').onclick = () => setZoom(zoom + 0.5);
 $('zoom-out').onclick = () => setZoom(zoom - 0.5);
 $('zoom-fit').onclick = () => setZoom(1);
 $('xray').addEventListener('click', () => setZoom(zoom === 1 ? 2.5 : 1));
+
+function sheetFindings() {
+  const number = v => v === '' ? null : Number(v);
+  return [...$('rows').querySelectorAll('tr')].map(tr => ({
+    tooth: number(tr.querySelector('.tooth').value),
+    condition: tr.querySelector('.condition').value,
+    category: tr.querySelector('.category').value,
+    confidence: number(tr.querySelector('.confidence').value),
+    note: tr.querySelector('.note').value.trim(),
+  }));
+}
+
+// Drafts live in this browser only (localStorage), one per reader and case, until saved.
+const draftKey = c => `nacrt:${location.pathname}:${readerLabel()}:${c}`;
+function keepDraft() {
+  if (!current) return;
+  const draft = {findings: sheetFindings(), overall_diagnosis: $('overall').value};
+  try { localStorage.setItem(draftKey(current), JSON.stringify(draft)); } catch (e) {}
+}
+function readDraft(c) {
+  try { return JSON.parse(localStorage.getItem(draftKey(c))) || null; } catch (e) { return null; }
+}
+function dropDraft(c) { try { localStorage.removeItem(draftKey(c)); } catch (e) {} }
 
 function firstUnread() { return CASE_IDS.find(c => !answers[c]) || null; }
 
@@ -281,17 +306,18 @@ async function openCase(c, force) {
   if (dirty && !force && current && current !== c) {
     pending = c; $('unsaved').hidden = false; $('unsaved').scrollIntoView({block: 'nearest'}); return;
   }
-  pending = null; $('unsaved').hidden = true;
-  current = c; dirty = false;
+  pending = null; $('unsaved').hidden = true; $('just-saved').hidden = true;
+  const draft = readDraft(c), shown = draft || answers[c];
+  current = c; dirty = Boolean(draft);
   const ticket = ++opening;  // a later click wins over a case still loading
   $('case-title').textContent = `Slučaj ${c} (${CASE_IDS.indexOf(c) + 1} od ${CASE_IDS.length})`;
   $('xray').removeAttribute('src'); $('xray').alt = `Panoramska snimka, slučaj ${c}`;
   setZoom(1);
   $('case-file').innerHTML = '<p class="muted">Učitavanje…</p>';
   $('rows').innerHTML = ''; $('problems').innerHTML = '';
-  const saved = answers[c];
-  (saved ? saved.findings : []).forEach(addRow);
-  $('overall').value = saved ? saved.overall_diagnosis : '';
+  (shown ? shown.findings : []).forEach(addRow);
+  $('overall').value = shown ? shown.overall_diagnosis : '';
+  $('restored').hidden = !draft;
   renderNav(); show('reader'); window.scrollTo(0, 0);
   let content;
   try { content = await caseContent(c); }
@@ -307,21 +333,21 @@ async function openCase(c, force) {
 function finish() { renderNav(); show('finished'); }
 function continueReading() { const next = firstUnread(); if (next) openCase(next); else finish(); }
 
-$('overall').addEventListener('input', () => { dirty = true; });
-$('add').addEventListener('click', () => { addRow(); dirty = true; });
-$('discard').addEventListener('click', () => { if (pending) openCase(pending, true); });
+$('overall').addEventListener('input', () => { dirty = true; keepDraft(); });
+$('rows').addEventListener('input', keepDraft);
+$('rows').addEventListener('change', keepDraft);
+$('add').addEventListener('click', () => { addRow(); dirty = true; keepDraft(); });
+$('discard').addEventListener('click', () => { if (pending) { dropDraft(current); openCase(pending, true); } });
 $('stay').addEventListener('click', () => { pending = null; $('unsaved').hidden = true; });
 window.addEventListener('beforeunload', e => { if (dirty) { e.preventDefault(); e.returnValue = ''; } });
 
+function showProblems(html) {
+  $('problems').innerHTML = html;
+  $('problems').scrollIntoView({block: 'nearest'});  // on a phone it can be off screen
+}
+
 $('save').addEventListener('click', async () => {
-  const number = v => v === '' ? null : Number(v);
-  const findings = [...$('rows').querySelectorAll('tr')].map(tr => ({
-    tooth: number(tr.querySelector('.tooth').value),
-    condition: tr.querySelector('.condition').value,
-    category: tr.querySelector('.category').value,
-    confidence: number(tr.querySelector('.confidence').value),
-    note: tr.querySelector('.note').value.trim(),
-  }));
+  const findings = sheetFindings();
   const overall = $('overall').value.trim();
   const missing = [], seen = new Set();
   findings.forEach((f, i) => {
@@ -337,17 +363,20 @@ $('save').addEventListener('click', async () => {
   });
   if (!overall) missing.push('Upišite cjelovitu dijagnozu.');
   if (missing.length) {
-    $('problems').innerHTML = '<p>Nije spremljeno. Ispravite:</p><ul>' + missing.map(p => `<li>${esc(p)}</li>`).join('') + '</ul>';
+    showProblems('<p>Nije spremljeno. Ispravite:</p><ul>' + missing.map(p => `<li>${esc(p)}</li>`).join('') + '</ul>');
     return;
   }
   const answer = {case_id: current, overall_diagnosis: overall, findings, saved_at: new Date().toISOString()};
   $('save').disabled = true;
   try { await storeAnswer(answer); }
-  catch (e) { $('problems').textContent = 'Nije spremljeno: ' + (e.message || e); return; }
+  catch (e) { showProblems(`<p>Nije spremljeno: ${esc(e.message || e)}</p>`); return; }
   finally { $('save').disabled = false; }
   answers[answer.case_id] = answer;
+  dropDraft(answer.case_id);
   dirty = false;
   continueReading();
+  $('just-saved').textContent = `Slučaj ${answer.case_id} je spremljen.`;
+  $('just-saved').hidden = false;
 });
 
 const client = supabase.createClient(SETUP.supabase_url, SETUP.supabase_key);
